@@ -1,8 +1,9 @@
+require 'byebug'
 require 'active_support'
 require 'active_support/core_ext'
 require 'erb'
 require_relative './session'
-require 'byebug'
+require_relative './flash'
 
 class ControllerBase
   attr_reader :req, :res, :params
@@ -11,6 +12,8 @@ class ControllerBase
   def initialize(req, res, route_params = {})
     @req, @res = req, res
     @params = route_params.merge(req.params)
+    @already_built_response = false
+    @@protect_from_forgery ||= false
   end
 
   # Helper method to alias @already_built_response
@@ -20,43 +23,53 @@ class ControllerBase
 
   # Set the response status code and header
   def redirect_to(url)
-    unless already_built_response?
-      @res.header["location"] = url
-      @res.status = 302
-      @already_built_response = true
-    else
-      raise "Double redirect error"
-    end
+    raise "double render error" if already_built_response?
+
+    @res.status = 302
+    @res["Location"] = url
+
+    @already_built_response = true
+
     session.store_session(@res)
+    flash.store_flash(@res)
+
+    nil
   end
 
   # Populate the response with content.
   # Set the response's content type to the given type.
   # Raise an error if the developer tries to double render.
   def render_content(content, content_type)
-    unless already_built_response?
-      @res['Content-Type'] = content_type
-      @res.write(content)
-      @already_built_response = true
-    else
-      # double render error -- return? raise?
-      raise "Double render error"
-    end
+    raise "double render error" if already_built_response?
+
+    @res.write(content)
+    @res['Content-Type'] = content_type
+
+    @already_built_response = true
+
     session.store_session(@res)
+    flash.store_flash(@res)
+
+    nil
   end
+
+  # Phase 3
 
   # use ERB and binding to evaluate templates
   # pass the rendered html to render_content
   def render(template_name)
-    unless already_built_response?
-      template_path = "views/#{self.class.to_s.underscore}/#{template_name}.html.erb"
-      contents = File.read(template_path)
-      template = ERB.new(contents).result(binding)
-      render_content(template, "text/html")
-      @already_built_response = true
-    else
-      raise "Double render error"
-    end
+    dir_path = File.dirname(__FILE__)
+    template_fname = File.join(
+      dir_path, "..",
+      "views", self.class.name.underscore, "#{template_name}.html.erb"
+    )
+
+    template_code = File.read(template_fname)
+
+    render_content(
+      ERB.new(template_code).result(binding),
+      "text/html"
+    )
   end
 
   # method exposing a `Session` object
@@ -64,9 +77,20 @@ class ControllerBase
     @session ||= Session.new(@req)
   end
 
+  def flash
+    @flash ||= Flash.new(@req)
+  end
+
   # use this with the router to call action_name (:index, :show, :create...)
   def invoke_action(name)
+    if protect_from_forgery? && req.request_method != "GET"
+      check_authenticity_token
+    else
+      form_authenticity_token
+    end
+
     self.send(name)
     render(name) unless already_built_response?
+
+    nil
   end
-end
